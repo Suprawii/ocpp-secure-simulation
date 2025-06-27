@@ -1,0 +1,12 @@
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+*.env
+*.sqlite3
+*.db
+certs/
+central_system/certs/
+charge_point/certs/
+.idea/
+.vscode/

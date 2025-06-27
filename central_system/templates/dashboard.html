@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>OCPP 2.0.1 Security Dashboard</title>
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.5/font/bootstrap-icons.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        body { background: #f6f7fa }
+        .card { margin-bottom: 1rem; }
+        .status-badge { font-size: 0.9rem; }
+        .table tbody tr td { vertical-align: middle; }
+        .secure-lock { color: #198754; }
+        .unsecure-lock { color: #dc3545; }
+        .timeline {
+            border-left: 4px solid #0dcaf0;
+            margin-left: 25px;
+            padding-left: 20px;
+        }
+        .timeline-event {
+            margin-bottom: 15px;
+        }
+        .badge-success, .bg-success { background: #198754 !important; }
+        .badge-info, .bg-info { background: #0dcaf0 !important; }
+        .badge-warning, .bg-warning { background: #ffc107 !important; }
+        .badge-danger, .bg-danger { background: #dc3545 !important; }
+    </style>
+</head>
+<body>
+<div class="container py-4">
+    <h1 class="mb-4 text-center">OCPP 2.0.1 <span class="text-info">Security Dashboard</span></h1>
+    <div class="row mb-3">
+        <div class="col-lg-7">
+            <div class="card shadow">
+                <div class="card-header bg-primary text-white d-flex justify-content-between align-items-center">
+                    <span><i class="bi bi-lightning-charge-fill"></i> Charge Point Status</span>
+                    <span class="badge bg-secondary" id="secure-badge" style="display:none;">All Secure</span>
+                </div>
+                <div class="card-body">
+                    <div class="row text-center mb-2">
+                        <div class="col">
+                            <h2 id="connected-count">0</h2>
+                            <div>Connected</div>
+                        </div>
+                        <div class="col">
+                            <h2 id="total-count">0</h2>
+                            <div>Total Registered</div>
+                        </div>
+                    </div>
+                    <div class="table-responsive">
+                        <table class="table table-sm align-middle table-bordered" id="cp-table">
+                            <thead>
+                            <tr>
+                                <th>ID</th>
+                                <th>Status</th>
+                                <th>Username</th>
+                                <th>Security</th>
+                                <th>Last Activity</th>
+                            </tr>
+                            </thead>
+                            <tbody id="cp-table-body">
+                            <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        </div>
+        <div class="col-lg-5">
+            <div class="card shadow mb-3">
+                <div class="card-header bg-danger text-white">
+                    <i class="bi bi-shield-lock-fill"></i> Security Events
+                </div>
+                <div class="card-body p-2">
+                    <div class="mb-2">
+                        <input class="form-control form-control-sm" id="event-search" placeholder="Filter by charge point or event type">
+                    </div>
+                    <div class="table-responsive" style="max-height: 320px; overflow-y: auto;">
+                        <table class="table table-sm table-striped align-middle mb-0" id="event-table">
+                            <thead>
+                            <tr>
+                                <th>Time</th>
+                                <th>Charge Point</th>
+                                <th>Event</th>
+                                <th>Severity</th>
+                                <th>Details</th>
+                            </tr>
+                            </thead>
+                            <tbody id="event-table-body">
+                            <!-- Populated by JS -->
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+            <div class="card shadow">
+                <div class="card-header bg-info text-white">
+                    <i class="bi bi-bar-chart-line-fill"></i> Connection Statistics
+                </div>
+                <div class="card-body">
+                    <canvas id="connChart" height="120"></canvas>
+                </div>
+            </div>
+        </div>
+    </div>
+    <!-- Details Modal -->
+    <div class="modal fade" id="cpDetailModal" tabindex="-1" aria-labelledby="cpDetailModalLabel" aria-hidden="true">
+      <div class="modal-dialog modal-dialog-scrollable">
+        <div class="modal-content">
+          <div class="modal-header bg-primary text-white">
+            <h5 class="modal-title" id="cpDetailModalLabel">Charge Point Details</h5>
+            <button type="button" class="btn-close btn-close-white" data-bs-dismiss="modal" aria-label="Close"></button>
+          </div>
+          <div class="modal-body" id="detail-modal-body">
+              <!-- Details populated by JS -->
+          </div>
+        </div>
+      </div>
+    </div>
+</div>
+<script src="https://cdn.socket.io/4.7.4/socket.io.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/js/bootstrap.bundle.min.js"></script>
+<script>
+    const socket = io();
+    let cpStatus = {};
+    let cpSecurity = {};
+    let cpUsers = {};
+    let securityEvents = [];
+    let connStats = [{time: new Date().toLocaleTimeString(), count: 0}];
+
+    function badge(sev) {
+        if (sev === "Success") return '<span class="badge bg-success">Success</span>';
+        if (sev === "Info") return '<span class="badge bg-info text-dark">Info</span>';
+        if (sev === "Warning") return '<span class="badge bg-warning text-dark">Warning</span>';
+        if (sev === "Error") return '<span class="badge bg-danger">Error</span>';
+        return sev;
+    }
+
+    function lockIcon(secure) {
+        return secure ?
+            '<i class="bi bi-lock-fill secure-lock" title="TLS Secure"></i>' :
+            '<i class="bi bi-unlock-fill unsecure-lock" title="Not Secure"></i>';
+    }
+
+    function renderCPTable() {
+        const tbody = document.getElementById('cp-table-body');
+        tbody.innerHTML = '';
+        Object.entries(cpStatus).forEach(([cpid, data]) => {
+            const username = cpUsers[cpid] || '';
+            const secInfo = cpSecurity[cpid] || {};
+            const secure = !!secInfo.tls;
+            const secLabel = secure
+                ? `<span class="badge bg-success"><i class="bi bi-lock-fill"></i> TLS</span>`
+                : `<span class="badge bg-danger"><i class="bi bi-unlock-fill"></i> Unsecure</span>`;
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td><a href="#" class="text-decoration-none cp-detail-link" data-cpid="${cpid}">${cpid}</a></td>
+                <td>${data.status === "connected"
+                    ? '<span class="badge bg-success">Connected</span>'
+                    : '<span class="badge bg-secondary">Disconnected</span>'}</td>
+                <td>${username}</td>
+                <td>${secLabel}</td>
+                <td>${data.last_activity ? new Date(data.last_activity).toLocaleTimeString() : ''}</td>`;
+            tbody.appendChild(tr);
+        });
+        // Show secure badge if all connected are secure
+        const allSecure = Object.values(cpSecurity).filter(x=>x.tls).length === Object.values(cpStatus).filter(x=>x.status==="connected").length;
+        document.getElementById('secure-badge').style.display = allSecure && Object.values(cpStatus).filter(x=>x.status==="connected").length > 0 ? '' : 'none';
+    }
+
+    function renderEventTable() {
+        const tbody = document.getElementById('event-table-body');
+        const filterValue = document.getElementById('event-search').value.trim().toLowerCase();
+        tbody.innerHTML = '';
+        securityEvents
+            .filter(ev => !filterValue ||
+                (ev.charge_point_id && ev.charge_point_id.toLowerCase().includes(filterValue)) ||
+                (ev.event_type && ev.event_type.toLowerCase().includes(filterValue)))
+            .slice(-100)
+            .reverse()
+            .forEach(ev => {
+                const detailText = (typeof ev.details === "string" && ev.details.trim()) ? ev.details
+                    : (ev.details && typeof ev.details === "object" ? JSON.stringify(ev.details) : "No values");
+                const renderedDetail = detailText && detailText.trim()
+                    ? `<span data-bs-toggle="tooltip" title="${detailText.replace(/"/g,'&quot;')}">${detailText.length > 30 ? detailText.substring(0,30)+'...' : detailText}</span>`
+                    : '<span class="text-muted">No values</span>';
+                const tr = document.createElement('tr');
+                tr.innerHTML = `
+                    <td>${new Date(ev.timestamp).toLocaleTimeString()}</td>
+                    <td>${ev.charge_point_id}</td>
+                    <td>${ev.event_type}</td>
+                    <td>${badge(ev.severity)}</td>
+                    <td>
+                        ${renderedDetail}
+                    </td>
+                `;
+                tbody.appendChild(tr);
+            });
+        // (Re-)enable tooltips
+        var tooltipTriggerList = [].slice.call(document.querySelectorAll('[data-bs-toggle="tooltip"]'));
+        tooltipTriggerList.map(function (tooltipTriggerEl) {
+            return new bootstrap.Tooltip(tooltipTriggerEl)
+        });
+    }
+
+    socket.on('status_update', function (data) {
+        // data: {connected: [...], disconnected: [...], total: N}
+        cpStatus = {};
+        (data.connected || []).forEach(c => cpStatus[c.charge_point_id] = c);
+        (data.disconnected || []).forEach(c => cpStatus[c.charge_point_id] = c);
+        document.getElementById('connected-count').textContent = (data.connected || []).length;
+        document.getElementById('total-count').textContent = data.total;
+        renderCPTable();
+
+        // update connection stats
+        connStats.push({time: new Date().toLocaleTimeString(), count: (data.connected || []).length});
+        if (connStats.length > 20) connStats.shift();
+        renderChart();
+    });
+
+    socket.on('security_event', function (ev) {
+        securityEvents.push(ev);
+        // Save security info by charge point
+        if(ev.event_type === "TLS Connection Secure") {
+            cpSecurity[ev.charge_point_id] = {tls: true, details: ev.details};
+        }
+        if(ev.event_type === "Authenticated") {
+            // Parse username from details
+            const m = (ev.details || '').match(/Username:\s*(\w+)/i);
+            if(m) cpUsers[ev.charge_point_id] = m[1];
+        }
+        renderEventTable();
+        renderCPTable();
+    });
+
+    function renderChart() {
+        const ctx = document.getElementById('connChart').getContext('2d');
+        if(window.connChartObj) window.connChartObj.destroy();
+        window.connChartObj = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels: connStats.map(x=>x.time),
+                datasets: [{
+                    label: 'Connections',
+                    data: connStats.map(x=>x.count),
+                    fill: false,
+                    borderColor: '#0dcaf0',
+                    tension: 0.1
+                }]
+            },
+            options: {
+                plugins: { legend: { display: false } },
+                scales: {
+                    y: { beginAtZero: true, precision:0, stepSize: 1, min: 0 }
+                }
+            }
+        });
+    }
+
+    // Detail drawer/modal
+    document.addEventListener('click', function(e) {
+        if(e.target.classList.contains('cp-detail-link')) {
+            e.preventDefault();
+            const cpid = e.target.getAttribute('data-cpid');
+            let html = `<h5>${cpid}</h5>`;
+            html += `<div>Status: ${cpStatus[cpid]?.status === "connected" ? '<span class="badge bg-success">Connected</span>' : '<span class="badge bg-secondary">Disconnected</span>'}</div>`;
+            html += `<div>Username: <b>${cpUsers[cpid] || 'N/A'}</b></div>`;
+            html += `<div>Security: ${cpSecurity[cpid]?.tls
+                    ? `<span class="badge bg-success"><i class="bi bi-lock-fill"></i> TLS Secure</span>`
+                    : `<span class="badge bg-danger"><i class="bi bi-unlock-fill"></i> Unsecure</span>`}</div>`;
+            html += `<div>Last Activity: ${cpStatus[cpid]?.last_activity ? new Date(cpStatus[cpid].last_activity).toLocaleString() : 'N/A'}</div>`;
+            if(cpSecurity[cpid]?.details) {
+                html += `<div class="mt-2"><b>TLS Details:</b><br><small>${cpSecurity[cpid].details}</small></div>`;
+            }
+            // Timeline of events for this charge point
+            html += `<div class="timeline mt-3"><b>Connection & Security Events:</b>`;
+            securityEvents.filter(ev => ev.charge_point_id === cpid)
+                .slice(-10)
+                .reverse()
+                .forEach(ev=>{
+                    html += `<div class="timeline-event"><span class="fw-bold">${ev.event_type}</span> <span class="ms-2">${badge(ev.severity)}</span><br><small>${(typeof ev.details === "string" && ev.details.trim()) ? ev.details : (ev.details && typeof ev.details === "object" ? JSON.stringify(ev.details) : "No values")}</small><br><span class="text-secondary">${new Date(ev.timestamp).toLocaleTimeString()}</span></div>`;
+                });
+            html += `</div>`;
+            document.getElementById('detail-modal-body').innerHTML = html;
+            new bootstrap.Modal(document.getElementById('cpDetailModal')).show();
+        }
+    });
+
+    document.getElementById('event-search').addEventListener('input', renderEventTable);
+
+    // Initial render
+    renderCPTable();
+    renderEventTable();
+    renderChart();
+</script>
+</body>
+</html>

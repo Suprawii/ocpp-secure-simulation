@@ -1,0 +1,58 @@
+body {
+    background: #f6f7fa;
+}
+
+.card {
+    margin-bottom: 1rem;
+}
+
+.status-connected {
+    color: #198754;
+    font-weight: bold;
+}
+
+.status-disconnected {
+    color: #dc3545;
+    font-weight: bold;
+}
+
+.security-critical {
+    background: #f8d7da !important;
+}
+
+.security-high {
+    background: #fff3cd !important;
+}
+
+.security-info {
+    background: #cff4fc !important;
+}
+
+.table th, .table td {
+    vertical-align: middle;
+}
+
+.badge {
+    font-size: 0.9em;
+}
+
+#dashboard-content {
+    margin-top: 1.5rem;
+}
+
+.card-header {
+    font-weight: bold;
+}
+
+.table-hover tbody tr:hover {
+    background-color: #f1f3f5;
+}
+
+@media (max-width: 767px) {
+    .card-title {
+        font-size: 1rem;
+    }
+    h2.card-text {
+        font-size: 1.4rem;
+    }
+}
