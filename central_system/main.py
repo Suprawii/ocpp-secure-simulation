@@ -16,6 +16,9 @@ flask_app = Flask(__name__)
 socketio = SocketIO(flask_app, async_mode='threading')
 flask_app.config['SECRET_KEY'] = 'your-secret-key'
 
+# Store latest meter values per charge point
+latest_meter_values = {}
+
 class MyChargePoint(OcppChargePoint):
     @on("BootNotification")
     async def on_boot_notification(self, charging_station, reason, **kwargs):
@@ -54,7 +57,16 @@ class MyChargePoint(OcppChargePoint):
             "severity": "Info",
             "details": format_meter_values(meter_value)
         })
-        # No payload needed for MeterValues response in OCPP 2.0.1
+        # --- Emit meter_value event for dashboard ---
+        socketio.emit('meter_value', {
+            "charge_point_id": self.id,
+            "timestamp": datetime.datetime.now().isoformat(),
+            "value": meter_value
+        })
+        latest_meter_values[self.id] = {
+            "timestamp": datetime.datetime.now().isoformat(),
+            "value": meter_value
+        }
         return call_result.MeterValues()
 
 class CentralSystem:
@@ -252,6 +264,8 @@ class CentralSystem:
         }
         print("Dashboard status_update:", status_data)
         socketio.emit('status_update', status_data)
+        # Also emit latest meter values to new dashboard clients
+        socketio.emit('meter_values_bulk', latest_meter_values)
 
 @flask_app.route('/')
 def dashboard():
@@ -260,6 +274,8 @@ def dashboard():
 @socketio.on('connect')
 def handle_connect():
     print('Dashboard client connected')
+    # Emit the latest meter values to new dashboard client
+    socketio.emit('meter_values_bulk', latest_meter_values)
 
 def run_flask_app():
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False)

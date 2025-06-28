@@ -66,6 +66,15 @@
                     </div>
                 </div>
             </div>
+            <!-- MeterValues Card -->
+            <div class="card shadow mt-3" id="meter-values" style="display:none;">
+                <div class="card-header bg-success text-white">
+                    <i class="bi bi-speedometer2"></i> Latest Meter Values
+                </div>
+                <div class="card-body" id="meter-values-body">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
         </div>
         <div class="col-lg-5">
             <div class="card shadow mb-3">
@@ -128,6 +137,7 @@
     let cpUsers = {};
     let securityEvents = [];
     let connStats = [{time: new Date().toLocaleTimeString(), count: 0}];
+    let meterValues = {};
 
     function badge(sev) {
         if (sev === "Success") return '<span class="badge bg-success">Success</span>';
@@ -204,8 +214,39 @@
         });
     }
 
+    function renderMeterValuesTable() {
+        const mvDiv = document.getElementById('meter-values');
+        const mvBody = document.getElementById('meter-values-body');
+        if (Object.keys(meterValues).length === 0) {
+            mvDiv.style.display = "none";
+            mvBody.innerHTML = "";
+            return;
+        }
+        mvDiv.style.display = "";
+        let html = `<table class="table table-sm table-bordered">
+        <thead><tr><th>Charge Point</th><th>Time</th><th>Power (kW)</th></tr></thead><tbody>`;
+        for (const [cpid, mv] of Object.entries(meterValues)) {
+            let val = "N/A";
+            try {
+                // The backend should emit meter_value as a list of dicts
+                // OCPP 2.0.1 format: [{timestamp, sampledValue: [{value, measurand, ...}]}]
+                if (Array.isArray(mv.value) && mv.value.length > 0
+                    && mv.value[0].sampledValue && mv.value[0].sampledValue.length > 0
+                    && mv.value[0].sampledValue[0].value !== undefined) {
+                    val = mv.value[0].sampledValue[0].value;
+                }
+            } catch (e) {}
+            html += `<tr>
+            <td>${cpid}</td>
+            <td>${mv.timestamp ? new Date(mv.timestamp).toLocaleTimeString() : ''}</td>
+            <td>${val}</td>
+            </tr>`;
+        }
+        html += `</tbody></table>`;
+        mvBody.innerHTML = html;
+    }
+
     socket.on('status_update', function (data) {
-        // data: {connected: [...], disconnected: [...], total: N}
         cpStatus = {};
         (data.connected || []).forEach(c => cpStatus[c.charge_point_id] = c);
         (data.disconnected || []).forEach(c => cpStatus[c.charge_point_id] = c);
@@ -221,17 +262,26 @@
 
     socket.on('security_event', function (ev) {
         securityEvents.push(ev);
-        // Save security info by charge point
         if(ev.event_type === "TLS Connection Secure") {
             cpSecurity[ev.charge_point_id] = {tls: true, details: ev.details};
         }
         if(ev.event_type === "Authenticated") {
-            // Parse username from details
             const m = (ev.details || '').match(/Username:\s*(\w+)/i);
             if(m) cpUsers[ev.charge_point_id] = m[1];
         }
         renderEventTable();
         renderCPTable();
+    });
+
+    socket.on('meter_value', function (data) {
+        meterValues[data.charge_point_id] = data;
+        renderMeterValuesTable();
+    });
+
+    // Support bulk load on new connect/reload
+    socket.on('meter_values_bulk', function (bulk) {
+        meterValues = bulk || {};
+        renderMeterValuesTable();
     });
 
     function renderChart() {
@@ -258,7 +308,6 @@
         });
     }
 
-    // Detail drawer/modal
     document.addEventListener('click', function(e) {
         if(e.target.classList.contains('cp-detail-link')) {
             e.preventDefault();
@@ -273,7 +322,6 @@
             if(cpSecurity[cpid]?.details) {
                 html += `<div class="mt-2"><b>TLS Details:</b><br><small>${cpSecurity[cpid].details}</small></div>`;
             }
-            // Timeline of events for this charge point
             html += `<div class="timeline mt-3"><b>Connection & Security Events:</b>`;
             securityEvents.filter(ev => ev.charge_point_id === cpid)
                 .slice(-10)
@@ -288,11 +336,10 @@
     });
 
     document.getElementById('event-search').addEventListener('input', renderEventTable);
-
-    // Initial render
     renderCPTable();
     renderEventTable();
     renderChart();
+    renderMeterValuesTable();
 </script>
 </body>
 </html>
