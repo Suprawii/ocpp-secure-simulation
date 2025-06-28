@@ -18,6 +18,7 @@ This project demonstrates a secure implementation of the Open Charge Point Proto
 ### 1. Clone the Repository
 
 git clone https://github.com/Suprawii/ocpp-secure-simulation.git
+
 cd ocpp-secure-simulation
 
 ### 2. Install Dependencies
