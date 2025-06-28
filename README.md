@@ -34,12 +34,14 @@ This will create the necessary CA, server, and client certificates in the approp
 ### 4. Run the Central System
 
 cd central_system
+
 python main.py
 
 ### 5. Run the Charge Point
 
 
 cd charge_point
+
 python main.py
 
 
