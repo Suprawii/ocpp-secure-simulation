@@ -25,19 +25,25 @@ cd ocpp-secure-simulation
 
 pip install -r requirements.txt
 
-### 3. Generate Certificates
+### 3. Generate a Fernet Key
+Fernet Key Generation (for Secure Password Storage)
+Before running the Charge Point or CSMS, you must generate a Fernet encryption key for securing sensitive data such as passwords : 
+
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > fernet.key 
+
+### 4. Generate Certificates
 
 python generate_certs.py
 
 This will create the necessary CA, server, and client certificates in the appropriate folders.
 
-### 4. Run the Central System
+### 5. Run the Central System
 
 cd central_system
 
 python main.py
 
-### 5. Run the Charge Point
+### 6. Run the Charge Point
 
 
 cd charge_point
@@ -49,6 +55,7 @@ python main.py
 
 - **Certificates**: All TLS certificates are generated locally for simulation using the provided script. In production, use a secure CA and manage private keys carefully.
 - **Authentication**: The charge point authenticates to the CSMS using both mutual TLS and HTTP Basic Auth.
+- **Fernet Key:** : The Fernet key is used for symmetric encryption (e.g., for passwords). Store it securely and do not share or commit it.
 - **Configuration**: Adjust configuration files (e.g., `config.ini`) as needed for your environment.
 
 
