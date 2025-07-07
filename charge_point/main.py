@@ -8,6 +8,32 @@ import base64
 from ocpp.v201.enums import RegistrationStatusEnumType
 import random
 import datetime
+import secrets
+import string
+
+from password_store import store_password, load_password
+
+# --- CONFIGURATION ---
+
+CP_IDENTITY_KEY = "id"
+CP_SECTION = "CHARGE_POINT"
+CSMS_URL_KEY = "url"
+CSMS_SECTION = "CSMS"
+
+def generate_password(length=24):
+    # Allowed: alphanumeric and special chars in OCPP passwordString
+    chars = string.ascii_letters + string.digits + "!@#$%^&*()-_=+"
+    return ''.join(secrets.choice(chars) for _ in range(length))
+
+def ensure_dynamic_password(config):
+    cp_id = config.get(CP_SECTION, CP_IDENTITY_KEY, fallback='CP001')
+    cp_password = load_password()  # <-- ENCRYPTED LOAD
+    # Only use local password file, no REST registration
+    if not cp_password:
+        cp_password = generate_password()
+        print(f"[CP] Generated password for {cp_id}.")
+        store_password(cp_password)  # <-- ENCRYPTED SAVE
+    return cp_id, cp_password
 
 class ChargePoint(cp):
     def __init__(self, charge_point_id, websocket):
@@ -65,14 +91,14 @@ async def main():
     config = configparser.ConfigParser()
     config.read('config.ini')
 
-    cp_id = config.get('CHARGE_POINT', 'id', fallback='CP001')
-    cp_password = config.get('CHARGE_POINT', 'password', fallback='BatteryPowerSecure123!')
-    base_url = config.get('CSMS', 'url', fallback='wss://localhost:9000')
+    # --- Dynamic credential handling ---
+    cp_id, cp_password = ensure_dynamic_password(config)
+    base_url = config.get(CSMS_SECTION, CSMS_URL_KEY, fallback='wss://localhost:9000')
     csms_url = f"{base_url.rstrip('/')}/{cp_id}"
 
     ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
     ssl_context.load_verify_locations(cafile='certs/ca.crt')
-    ssl_context.load_cert_chain(certfile='certs/client.crt', keyfile='certs/client.key')  # <-- ADD THIS LINE
+    ssl_context.load_cert_chain(certfile='certs/client.crt', keyfile='certs/client.key') 
     ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
 
     auth_string = f"{cp_id}:{cp_password}"

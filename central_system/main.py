@@ -12,9 +12,15 @@ from ocpp.v201 import call_result
 from ocpp.routing import on
 import re 
 
+# --- secure DB-backed authentication ---
+from csms_db import create_table, check_basic_auth, add_cp, cp_exists
+
 flask_app = Flask(__name__)
 socketio = SocketIO(flask_app, async_mode='threading')
 flask_app.config['SECRET_KEY'] = 'your-secret-key'
+
+# Ensure DB table exists at startup
+create_table()
 
 # Store latest meter values per charge point
 latest_meter_values = {}
@@ -72,10 +78,6 @@ class MyChargePoint(OcppChargePoint):
 class CentralSystem:
     def __init__(self):
         self.connected_chargers = {}
-        self.auth_credentials = {
-            "CP001": "BatteryPowerSecure123!",
-            "CP002": "EVChargerSecret456!"
-        }
 
     def _emit_security_event(self, charge_point_id, event_type, severity, details):
         socketio.emit('security_event', {
@@ -182,7 +184,30 @@ class CentralSystem:
                 return
             decoded = base64.b64decode(auth_string).decode("utf-8")
             username, password = decoded.split(":", 1)
-            if (username in self.auth_credentials and password == self.auth_credentials[username]):
+            # --- Auto-registration logic for new CPs ---
+            if cp_exists(username):
+                if check_basic_auth(username, password):
+                    auth_valid = True
+                else:
+                    print(f"[{username}] Invalid credentials.")
+                    self._emit_security_event(
+                        username,
+                        "InvalidAuthentication",
+                        "Error",
+                        "Authentication failed (username or password incorrect)"
+                    )
+                    await websocket.close()
+                    return
+            else:
+                # First time registration: store CP and password in DB
+                add_cp(username, password)
+                print(f"[{username}] Registered new CP (first-time connection).")
+                self._emit_security_event(
+                    username,
+                    "FirstTimeRegistration",
+                    "Success",
+                    "Registered new CP and accepted credentials"
+                )
                 auth_valid = True
         except Exception as e:
             print(f"[{charge_point_id}] Auth error: {e}")
@@ -278,6 +303,7 @@ def handle_connect():
     socketio.emit('meter_values_bulk', latest_meter_values)
 
 def run_flask_app():
+    # For dashboard only; can optionally be secured with SSL for production
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False)
 
 async def run_csms():

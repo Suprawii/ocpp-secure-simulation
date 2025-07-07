@@ -10,3 +10,7 @@ central_system/certs/
 charge_point/certs/
 .idea/
 .vscode/
+# Security-sensitive files
+fernet.key
+cp_password.txt
+cp_auth.db

@@ -6,3 +6,5 @@ configparser>=5.0.0
 flask>=2.0.0
 flask-socketio>=5.0.0
 eventlet>=0.30.0
+requests>=2.31.0
+bcrypt>=4.0.1

@@ -14,9 +14,34 @@
 
 ## Authentication
 
-- Basic authentication is used.
-- Passwords must be at least 12 characters, with at least one uppercase, one lowercase, one digit, and one special character.
-- Edit password requirements in `main.py` as needed.
+2. Basic Authentication (Post-TLS Handshake)
+-Each Charge Point sends a Basic Authorization header after the TLS handshake.
+
+-Passwords are dynamically generated, securely stored on the client (using Fernet encryption) and registered to the CSMS on first connection.
+
+-The CSMS:
+
+-Retrieves encrypted bcrypt password hashes from a SQLite database (cp_auth.db).
+
+-Decrypts hashes using a secure Fernet key stored in fernet.key.
+
+-Verifies credentials using bcrypt.
+
+-Password Requirements :
+
+Minimum 12 characters.
+
+-Must include:
+
+At least one uppercase letter.
+
+At least one lowercase letter.
+
+At least one digit.
+
+At least one special character.
+
+-Password policies are enforced during generation and validation.
 
 ## Security Events
 
