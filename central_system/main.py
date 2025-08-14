@@ -10,7 +10,10 @@ import datetime
 from ocpp.v201 import ChargePoint as OcppChargePoint
 from ocpp.v201 import call_result
 from ocpp.routing import on
-import re 
+import re
+import secrets
+import time
+from collections import defaultdict, deque
 
 # --- secure DB-backed authentication ---
 from csms_db import create_table, check_basic_auth, add_cp, cp_exists
@@ -25,24 +28,180 @@ create_table()
 # Store latest meter values per charge point
 latest_meter_values = {}
 
+# --- Replay attack defense: Nonce and timestamp management ---
+NONCE_EXPIRY_SECONDS = 120  # How long a nonce is valid for (from issuance)
+NONCE_LENGTH = 16
+MESSAGE_TIME_WINDOW = 30    # seconds allowed for incoming messages to be considered "fresh"
+
+# Per-CP nonce store: {cp_id: {"nonce": str, "issued": datetime, "used": bool}}
+cp_nonces = {}
+
+def gen_nonce():
+    return secrets.token_urlsafe(NONCE_LENGTH)
+
+# --- Rate limiting data structures and config ---
+cp_request_times = defaultdict(lambda: deque(maxlen=100))
+cp_blocked_until = {}
+RATE_LIMIT = 20      # max MeterValues per minute per CP
+BLOCK_DURATION = 60  # seconds to block after exceeding rate
+
 class MyChargePoint(OcppChargePoint):
     @on("BootNotification")
     async def on_boot_notification(self, charging_station, reason, **kwargs):
         print(f"BootNotification received from {self.id}")
+
+        # --- Issue fresh nonce on BootNotification ---
+        nonce = gen_nonce()
+        cp_nonces[self.id] = {
+            "nonce": nonce,
+            "issued": datetime.datetime.now(datetime.timezone.utc),
+            "used": False
+        }
+
         socketio.emit('security_event', {
             "timestamp": datetime.datetime.now().isoformat(),
             "charge_point_id": self.id,
             "event_type": "BootNotification",
-            "severity": "Info"
+            "severity": "Info",
+            "details": f"Issued nonce {nonce} for replay attack defense"
         })
         return call_result.BootNotification(
-            current_time=datetime.datetime.utcnow().isoformat(),
+            current_time=datetime.datetime.now(datetime.timezone.utc).isoformat(),
             interval=10,
-            status="Accepted"
+            status="Accepted",
+            custom_data={"vendorId": "SecureEV", "nonce": nonce}
         )
 
     @on("MeterValues")
-    async def on_meter_values(self, evse_id, meter_value, **kwargs):
+    async def on_meter_values(self, evse_id, meter_value, custom_data=None, **kwargs):
+        print(f"MeterValues received from {self.id}: {meter_value} (custom_data={custom_data})")
+
+        cp_id = self.id
+        nonce = None
+        if custom_data and "nonce" in custom_data:
+            nonce = custom_data["nonce"]
+        timestamp = None
+        if meter_value and len(meter_value) > 0:
+            timestamp = meter_value[0].get('timestamp')
+
+        # --- RATE LIMITING CHECK ---
+        now_ts = time.time()
+        # Blocked check
+        if cp_id in cp_blocked_until and now_ts < cp_blocked_until[cp_id]:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": cp_id,
+                "event_type": "RateLimit",
+                "severity": "Warning",
+                "details": f"Blocked for exceeding rate limit (until {datetime.datetime.fromtimestamp(cp_blocked_until[cp_id])})"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Rate limit exceeded, temporarily blocked"}
+            )
+        # Rate counting
+        req_times = cp_request_times[cp_id]
+        req_times.append(now_ts)
+        # Remove old timestamps (older than 60s)
+        while req_times and now_ts - req_times[0] > 60:
+            req_times.popleft()
+        if len(req_times) > RATE_LIMIT:
+            # Block CP
+            cp_blocked_until[cp_id] = now_ts + BLOCK_DURATION
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": cp_id,
+                "event_type": "RateLimit",
+                "severity": "Error",
+                "details": f"Blocked for {BLOCK_DURATION}s due to {len(req_times)} requests/min"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": f"Rate limit exceeded: blocked for {BLOCK_DURATION}s"}
+            )
+
+        # 1. Timestamp check
+        if not timestamp:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": self.id,
+                "event_type": "MeterValues",
+                "severity": "Error",
+                "details": "Missing timestamp"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Missing timestamp"}
+            )
+        try:
+            msg_time = datetime.datetime.fromisoformat(timestamp)
+            now = datetime.datetime.now(datetime.timezone.utc)
+            if abs((now - msg_time).total_seconds()) > MESSAGE_TIME_WINDOW:
+                socketio.emit('security_event', {
+                    "timestamp": datetime.datetime.now().isoformat(),
+                    "charge_point_id": self.id,
+                    "event_type": "MeterValues",
+                    "severity": "Error",
+                    "details": "Stale timestamp (possible replay)"
+                })
+                return call_result.MeterValues(
+                    custom_data={"vendorId": "SecureEV", "error": "Stale timestamp (possible replay)"}
+                )
+        except Exception:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": self.id,
+                "event_type": "MeterValues",
+                "severity": "Error",
+                "details": "Invalid timestamp format"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Invalid timestamp format"}
+            )
+
+        # 2. Nonce check
+        cp_nonce_info = cp_nonces.get(cp_id)
+        if not nonce or not cp_nonce_info or cp_nonce_info["nonce"] != nonce:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": self.id,
+                "event_type": "MeterValues",
+                "severity": "Error",
+                "details": "Invalid or missing nonce"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Invalid or missing nonce"}
+            )
+        if cp_nonce_info["used"]:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": self.id,
+                "event_type": "MeterValues",
+                "severity": "Error",
+                "details": "Nonce already used (replay)"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Nonce already used (replay)"}
+            )
+        if (datetime.datetime.now(datetime.timezone.utc) - cp_nonce_info["issued"]).total_seconds() > NONCE_EXPIRY_SECONDS:
+            socketio.emit('security_event', {
+                "timestamp": datetime.datetime.now().isoformat(),
+                "charge_point_id": self.id,
+                "event_type": "MeterValues",
+                "severity": "Error",
+                "details": "Nonce expired"
+            })
+            return call_result.MeterValues(
+                custom_data={"vendorId": "SecureEV", "error": "Nonce expired"}
+            )
+        # Mark nonce as used now (single-use)
+        cp_nonce_info["used"] = True
+
+        # --- CREATE AND ISSUE NEW NONCE FOR NEXT MESSAGE ---
+        new_nonce = gen_nonce()
+        cp_nonces[self.id] = {
+            "nonce": new_nonce,
+            "issued": datetime.datetime.now(datetime.timezone.utc),
+            "used": False
+        }
+
         def format_meter_values(meter_value):
             formatted = []
             for val in meter_value:
@@ -55,7 +214,6 @@ class MyChargePoint(OcppChargePoint):
                     formatted.append(f"{measurand or ''}: {value} {unit or ''} at {ts}")
             return "; ".join(formatted) if formatted else "No values"
 
-        print(f"MeterValues received from {self.id} | EVSE ID: {evse_id} | meter_value: {meter_value}")
         socketio.emit('security_event', {
             "timestamp": datetime.datetime.now().isoformat(),
             "charge_point_id": self.id,
@@ -63,7 +221,6 @@ class MyChargePoint(OcppChargePoint):
             "severity": "Info",
             "details": format_meter_values(meter_value)
         })
-        # --- Emit meter_value event for dashboard ---
         socketio.emit('meter_value', {
             "charge_point_id": self.id,
             "timestamp": datetime.datetime.now().isoformat(),
@@ -73,7 +230,7 @@ class MyChargePoint(OcppChargePoint):
             "timestamp": datetime.datetime.now().isoformat(),
             "value": meter_value
         }
-        return call_result.MeterValues()
+        return call_result.MeterValues(custom_data={"vendorId": "SecureEV", "status": "Accepted", "nonce": new_nonce})
 
 class CentralSystem:
     def __init__(self):
@@ -125,7 +282,6 @@ class CentralSystem:
                 await websocket.close()
                 return
 
-            # Check cipher suite (OCPP profile 2 required ciphers for TLS 1.2 only)
             allowed_ciphers_tls12 = [
                 "ECDHE-ECDSA-AES128-GCM-SHA256",
                 "ECDHE-ECDSA-AES256-GCM-SHA384",
@@ -142,7 +298,6 @@ class CentralSystem:
                     )
                     await websocket.close()
                     return
-            # For TLSv1.3 and above, accept the negotiated cipher (do not reject)
             self._emit_security_event(
                 charge_point_id,
                 "TLS Connection Secure",
@@ -184,7 +339,6 @@ class CentralSystem:
                 return
             decoded = base64.b64decode(auth_string).decode("utf-8")
             username, password = decoded.split(":", 1)
-            # --- Auto-registration logic for new CPs ---
             if cp_exists(username):
                 if check_basic_auth(username, password):
                     auth_valid = True
@@ -199,7 +353,6 @@ class CentralSystem:
                     await websocket.close()
                     return
             else:
-                # First time registration: store CP and password in DB
                 add_cp(username, password)
                 print(f"[{username}] Registered new CP (first-time connection).")
                 self._emit_security_event(
@@ -231,7 +384,6 @@ class CentralSystem:
             await websocket.close()
             return
 
-        # --- Authenticated: emit username (never password) ---
         self._emit_security_event(
             charge_point_id,
             "Authenticated",
@@ -289,7 +441,6 @@ class CentralSystem:
         }
         print("Dashboard status_update:", status_data)
         socketio.emit('status_update', status_data)
-        # Also emit latest meter values to new dashboard clients
         socketio.emit('meter_values_bulk', latest_meter_values)
 
 @flask_app.route('/')
@@ -299,11 +450,9 @@ def dashboard():
 @socketio.on('connect')
 def handle_connect():
     print('Dashboard client connected')
-    # Emit the latest meter values to new dashboard client
     socketio.emit('meter_values_bulk', latest_meter_values)
 
 def run_flask_app():
-    # For dashboard only; can optionally be secured with SSL for production
     socketio.run(flask_app, host='0.0.0.0', port=5000, debug=False)
 
 async def run_csms():
@@ -315,9 +464,8 @@ async def run_csms():
     ssl_context = ssl.create_default_context(ssl.Purpose.CLIENT_AUTH)
     ssl_context.load_cert_chain('certs/server.crt', 'certs/server.key')
     ssl_context.load_verify_locations(cafile='certs/ca.crt')
-    ssl_context.verify_mode = ssl.CERT_REQUIRED  # Now requires client certs
+    ssl_context.verify_mode = ssl.CERT_REQUIRED
     ssl_context.minimum_version = ssl.TLSVersion.TLSv1_2
-    # Add all OCPP profile 2 required ciphers (ECDHE-ECDSA + ECDHE-RSA)
     ssl_context.set_ciphers(
         'ECDHE-ECDSA-AES128-GCM-SHA256:'
         'ECDHE-ECDSA-AES256-GCM-SHA384:'

@@ -25,6 +25,30 @@
         .badge-info, .bg-info { background: #0dcaf0 !important; }
         .badge-warning, .bg-warning { background: #ffc107 !important; }
         .badge-danger, .bg-danger { background: #dc3545 !important; }
+        .replay-row {
+            background: #fff3cd !important;
+            color: #856404 !important;
+        }
+        .replay-alert {
+            color: #dc3545 !important;
+            font-weight: bold;
+            background: #fff3cd;
+            border-left: 4px solid #dc3545;
+            padding: 7px 12px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
+        .dos-alert {
+            color: #b34b00 !important;
+            font-weight: bold;
+            background: #ffe5b6;
+            border-left: 4px solid #ff8800;
+            padding: 7px 12px;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-size: 1rem;
+        }
     </style>
 </head>
 <body>
@@ -72,6 +96,24 @@
                     <i class="bi bi-speedometer2"></i> Latest Meter Values
                 </div>
                 <div class="card-body" id="meter-values-body">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+            <!-- Replay Attack Alerts -->
+            <div class="card shadow mt-3" id="replay-alerts-card" style="display:none;">
+                <div class="card-header bg-danger text-white">
+                    <i class="bi bi-exclamation-triangle-fill"></i> Replay Attack Alerts
+                </div>
+                <div class="card-body" id="replay-alerts-body">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+            <!-- DoS Attack Alerts -->
+            <div class="card shadow mt-3" id="dos-alerts-card" style="display:none;">
+                <div class="card-header bg-warning text-dark">
+                    <i class="bi bi-bug-fill"></i> DoS/Rate Limiting Alerts
+                </div>
+                <div class="card-body" id="dos-alerts-body">
                     <!-- Populated by JS -->
                 </div>
             </div>
@@ -138,6 +180,8 @@
     let securityEvents = [];
     let connStats = [{time: new Date().toLocaleTimeString(), count: 0}];
     let meterValues = {};
+    let replayAlerts = [];
+    let dosAlerts = [];
 
     function badge(sev) {
         if (sev === "Success") return '<span class="badge bg-success">Success</span>';
@@ -190,12 +234,20 @@
             .slice(-100)
             .reverse()
             .forEach(ev => {
+                const isReplay = ev.event_type === "MeterValues" && typeof ev.details === "string" && (
+                    ev.details.includes("Nonce already used")
+                    || ev.details.includes("Nonce expired")
+                    || ev.details.includes("Stale timestamp")
+                    || ev.details.includes("Invalid or missing nonce")
+                );
+                const isDoS = ev.event_type === "RateLimit";
                 const detailText = (typeof ev.details === "string" && ev.details.trim()) ? ev.details
                     : (ev.details && typeof ev.details === "object" ? JSON.stringify(ev.details) : "No values");
                 const renderedDetail = detailText && detailText.trim()
                     ? `<span data-bs-toggle="tooltip" title="${detailText.replace(/"/g,'&quot;')}">${detailText.length > 30 ? detailText.substring(0,30)+'...' : detailText}</span>`
                     : '<span class="text-muted">No values</span>';
                 const tr = document.createElement('tr');
+                tr.className = isReplay ? "replay-row" : isDoS ? "table-warning" : "";
                 tr.innerHTML = `
                     <td>${new Date(ev.timestamp).toLocaleTimeString()}</td>
                     <td>${ev.charge_point_id}</td>
@@ -228,8 +280,6 @@
         for (const [cpid, mv] of Object.entries(meterValues)) {
             let val = "N/A";
             try {
-                // The backend should emit meter_value as a list of dicts
-                // OCPP 2.0.1 format: [{timestamp, sampledValue: [{value, measurand, ...}]}]
                 if (Array.isArray(mv.value) && mv.value.length > 0
                     && mv.value[0].sampledValue && mv.value[0].sampledValue.length > 0
                     && mv.value[0].sampledValue[0].value !== undefined) {
@@ -244,6 +294,54 @@
         }
         html += `</tbody></table>`;
         mvBody.innerHTML = html;
+    }
+
+    function renderReplayAlerts() {
+        const replayDiv = document.getElementById('replay-alerts-card');
+        const replayBody = document.getElementById('replay-alerts-body');
+        const alerts = securityEvents.filter(ev =>
+            ev.event_type === "MeterValues" &&
+            typeof ev.details === "string" && (
+                ev.details.includes("Nonce already used")
+                || ev.details.includes("Nonce expired")
+                || ev.details.includes("Stale timestamp")
+                || ev.details.includes("Invalid or missing nonce")
+            )
+        ).slice(-5).reverse();
+        if(alerts.length === 0) {
+            replayDiv.style.display = "none";
+            replayBody.innerHTML = "";
+            return;
+        }
+        replayDiv.style.display = "";
+        replayBody.innerHTML = alerts.map(ev=>`
+            <div class="replay-alert">
+                <i class="bi bi-exclamation-triangle-fill"></i>
+                <b>${ev.charge_point_id}</b> - ${ev.details} &nbsp;
+                <small class="text-secondary">${new Date(ev.timestamp).toLocaleTimeString()}</small>
+            </div>
+        `).join('');
+    }
+
+    function renderDoSAlerts() {
+        const dosDiv = document.getElementById('dos-alerts-card');
+        const dosBody = document.getElementById('dos-alerts-body');
+        const alerts = securityEvents.filter(ev =>
+            ev.event_type === "RateLimit"
+        ).slice(-5).reverse();
+        if(alerts.length === 0) {
+            dosDiv.style.display = "none";
+            dosBody.innerHTML = "";
+            return;
+        }
+        dosDiv.style.display = "";
+        dosBody.innerHTML = alerts.map(ev=>`
+            <div class="dos-alert">
+                <i class="bi bi-bug-fill"></i>
+                <b>${ev.charge_point_id}</b> - ${ev.details} &nbsp;
+                <small class="text-secondary">${new Date(ev.timestamp).toLocaleTimeString()}</small>
+            </div>
+        `).join('');
     }
 
     socket.on('status_update', function (data) {
@@ -271,6 +369,8 @@
         }
         renderEventTable();
         renderCPTable();
+        renderReplayAlerts();
+        renderDoSAlerts();
     });
 
     socket.on('meter_value', function (data) {
@@ -278,7 +378,6 @@
         renderMeterValuesTable();
     });
 
-    // Support bulk load on new connect/reload
     socket.on('meter_values_bulk', function (bulk) {
         meterValues = bulk || {};
         renderMeterValuesTable();
@@ -340,6 +439,8 @@
     renderEventTable();
     renderChart();
     renderMeterValuesTable();
+    renderReplayAlerts();
+    renderDoSAlerts();
 </script>
 </body>
 </html>

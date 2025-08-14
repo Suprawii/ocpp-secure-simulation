@@ -39,13 +39,14 @@ class ChargePoint(cp):
     def __init__(self, charge_point_id, websocket):
         super().__init__(charge_point_id, websocket)
         self.connected = False
+        self.nonce = None  # For replay attack defense
 
     async def send_boot_notification(self):
         await asyncio.sleep(1)  # small delay to ensure session is up
         request = call.BootNotification(
             charging_station={
                 'model': 'SecureWallbox XYZ',
-                'vendor_name': 'SecureEV'
+                'vendor_name': 'SecureEV'  # python-ocpp expects vendor_name for requests
             },
             reason="PowerUp"
         )
@@ -55,6 +56,12 @@ class ChargePoint(cp):
                 print("Boot Notification failed: No response received (possible CallError from CSMS)")
                 return
             print(f"Boot Notification Response: {response}")
+            # --- Get nonce from CSMS response custom_data (if provided) ---
+            if hasattr(response, "custom_data") and response.custom_data and "nonce" in response.custom_data:
+                self.nonce = response.custom_data["nonce"]
+                print(f"[CP] Received nonce for replay defense: {self.nonce}")
+            else:
+                print("[CP] WARNING: No nonce received from CSMS!")
             if hasattr(response, 'status') and response.status == RegistrationStatusEnumType.accepted:
                 self.connected = True
                 print("Successfully registered with CSMS")
@@ -70,19 +77,41 @@ class ChargePoint(cp):
             await asyncio.sleep(10)
             try:
                 meter_value = {
-                    'timestamp': datetime.datetime.now().isoformat(),
+                    'timestamp': datetime.datetime.now(datetime.timezone.utc).isoformat(),
                     'sampledValue': [{
                         'value': random.randint(100, 5000)/100,
                         'measurand': 'Power.Active.Import',
                         'unitOfMeasure': {'unit': 'kW'}
                     }]
                 }
+                # The custom_data must include vendorId for OCPP 2.0.1
                 request = call.MeterValues(
                     evse_id=1,
-                    meter_value=[meter_value]
+                    meter_value=[meter_value],
+                    custom_data={
+                        "vendorId": "SecureEV",   # REQUIRED by python-ocpp schema!
+                        "nonce": self.nonce
+                    }
                 )
-                await self.call(request)
-                print(f"Sent meter value: {meter_value['sampledValue'][0]['value']} kW")
+                print(f"Sending MeterValues request: {request.__dict__}")
+                response = await self.call(request)
+                print(f"Sent meter value: {meter_value['sampledValue'][0]['value']} kW | timestamp: {meter_value['timestamp']} | nonce: {self.nonce}")
+
+                # --- Extract the new nonce from CSMS response and use it for the next message ---
+                if hasattr(response, "custom_data") and response.custom_data and "nonce" in response.custom_data:
+                    new_nonce = response.custom_data["nonce"]
+                    print(f"[CP] Received new nonce for next MeterValues: {new_nonce}")
+                    self.nonce = new_nonce
+                else:
+                    print("[CP] WARNING: No new nonce received from CSMS in MeterValues response! Further MeterValues will likely be rejected.")
+
+                # --- Handle rate limit errors (optional: disconnect/retry logic) ---
+                if hasattr(response, "custom_data") and response.custom_data and "error" in response.custom_data:
+                    error_msg = response.custom_data["error"]
+                    if "Rate limit exceeded" in error_msg:
+                        print(f"[CP] RATE LIMIT WARNING: {error_msg} - Backing off before next attempt.")
+                        await asyncio.sleep(15)  # Back off a bit longer
+
             except Exception as e:
                 print(f"Error sending meter values: {e}")
                 self.connected = False
