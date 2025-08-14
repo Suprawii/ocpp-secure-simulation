@@ -28,7 +28,13 @@ cd ocpp-secure-simulation
 pip install -r requirements.txt
 ```
 
-### 3. Generate Certificates
+### 3. Generate a Fernet Key
+Fernet Key Generation (for Secure Password Storage)
+Before running the Charge Point or CSMS, you must generate a Fernet encryption key for securing sensitive data such as passwords : 
+
+python -c "from cryptography.fernet import Fernet; print(Fernet.generate_key().decode())" > fernet.key 
+
+### 4. Generate Certificates
 
 ```sh
 python generate_certs.py
@@ -58,6 +64,7 @@ cd central_system
 python main.py
 ```
 
+### 6. Run the Charge Point
 ### 6. Run the Charge Point
 
 ```sh
